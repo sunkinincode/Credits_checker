@@ -4,326 +4,284 @@ import altair as alt
 import matplotlib.pyplot as plt
 from matplotlib import gridspec
 import io
-from streamlit_gsheets import GSheetsConnection
+
+# ตั้งค่าหน้าเว็บ
+st.set_page_config(page_title="Credits Checker For DekPSU", page_icon="🎓", layout="wide")
 
 # ---------------------------------------------------------
-# 2. ฟังก์ชันโหลดข้อมูล (แบบ Direct CSV )
+# 1. ฟังก์ชันโหลดข้อมูล
 # ---------------------------------------------------------
-@st.cache_data
+@st.cache_data(ttl=600)
 def load_data():
-    # ID ของ Google Sheet
+    # ⚠️ ใส่ ID ของ Google Sheet ของคุณที่นี่
     sheet_id = "1E12HO-5bd85vjFHnfcxZCLcN4y2k_uQnRgjE8zeGAbI"
     
-    # URL พิเศษสำหรับการดึงข้อมูลเป็น CSV
     base_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet="
 
-    # อ่านข้อมูลทีละแท็บโดยเอา Base URL + ชื่อแท็บ
-    # ถ้าชื่อแท็บใน Google Sheet เป็นภาษาไทย หรือมีเว้นวรรค ให้เปลี่ยนเป็นภาษาอังกฤษตัวติดกัน (Majors, CoreCourses...)
-    majors_df = pd.read_csv(base_url + "Majors")
-    core_courses_df = pd.read_csv(base_url + "CoreCourses")
-    gen_ed_df = pd.read_csv(base_url + "GenEd")
-    electives_df = pd.read_csv(base_url + "Electives")
-    
-    return majors_df, core_courses_df, gen_ed_df, electives_df
+    try:
+        df_faculty = pd.read_csv(base_url + "Faculty")
+        df_majors = pd.read_csv(base_url + "Majors")
+        df_core = pd.read_csv(base_url + "Core")
+        df_7group = pd.read_csv(base_url + "7group")
+        df_elec = pd.read_csv(base_url + "Elective")
+        df_free = pd.read_csv(base_url + "FreeElective")
 
-majors_df, core_courses_df, gen_ed_df, electives_df = load_data()
+        # Data Cleaning
+        if 'is_major_elective' in df_core.columns:
+            df_core['is_major_elective'] = df_core['is_major_elective'].astype(str).str.upper() == 'TRUE'
+        else:
+            df_core['is_major_elective'] = False
+
+        for df in [df_majors, df_core, df_7group, df_elec, df_free]:
+            if 'credits' in df.columns:
+                df['credits'] = pd.to_numeric(df['credits'], errors='coerce').fillna(0)
+        
+        df_core['term'] = pd.to_numeric(df_core['term'], errors='coerce').fillna(0)
+
+        return df_faculty, df_majors, df_core, df_7group, df_elec, df_free
+
+    except Exception as e:
+        st.error(f"Error loading data: {e}")
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+df_faculty, df_majors, df_core, df_7group, df_elec, df_free = load_data()
+
+if df_faculty.empty:
+    st.stop()
 
 # ---------------------------------------------------------
-# 3. User Interface
+# 2. UI Control Panel
 # ---------------------------------------------------------
 st.title("🎓 Credits Checker For DekPSU")
+st.markdown("---")
 
-# --- Control Panel ด้านบน ---
-col1, col2 = st.columns(2)
+col1, col2, col3 = st.columns([1, 2, 2])
 
+# Col 1: ปี/เทอม
 with col1:
-    selected_major_name = st.selectbox("เลือกสาขาวิชา", majors_df['major_name'])
-    total_credits = majors_df[majors_df['major_name'] == selected_major_name]['total_credits'].values[0]
+    term_options = [1.1, 1.2, 2.1, 2.2, 3.1, 3.2, 4.1, 4.2]
+    selected_term = st.selectbox(
+        "📅 ชั้นปีและเทอมปัจจุบัน", 
+        term_options, 
+        format_func=lambda x: f"ปี {int(x)} เทอม {int((x*10)%10)}"
+    )
 
+# Col 2: คณะ
 with col2:
-    # เลือกชั้นปีเพื่อใช้เป็น "ค่าเริ่มต้น" ในการติ๊กวิชาแกน
-    year_options = ['ปี 1', 'ปี 2', 'ปี 3', 'ปี 4']
-    selected_year_str = st.selectbox("คุณกำลังศึกษาอยู่ชั้นปีที่", year_options)
-    # แปลง "ปี 1" -> 1 (int) เพื่อใช้คำนวณ
-    current_year_num = int(selected_year_str.split(" ")[1])
+    if 'faculty_name' in df_faculty.columns:
+        fac_options = df_faculty.apply(lambda x: f"{x['faculty_name']} ({x['major_count']} สาขา)", axis=1).tolist()
+        selected_fac_display = st.selectbox("🏢 เลือกคณะ", fac_options)
+        selected_fac_name = selected_fac_display.split(" (")[0]
+    else:
+        st.error("Data Error")
+        st.stop()
 
-# ตัวแปรเก็บหน่วยกิตรวมทั้งหมด
-total_credits_earned = 0
+# Col 3: สาขา
+with col3:
+    filtered_majors = df_majors[df_majors['faculty_ref'] == selected_fac_name]
+    if filtered_majors.empty:
+        st.warning("ไม่พบสาขา")
+        st.stop()
+    selected_major_name = st.selectbox("📚 เลือกสาขาวิชา", filtered_majors['major_name'])
+    total_credits_goal = filtered_majors[filtered_majors['major_name'] == selected_major_name]['total_credits'].values[0]
 
-# สร้าง Tabs (เพิ่ม Tab ปรับแต่งเพิ่มเติม เป็น Tab แรก)
-tab_core, tab_gen, tab_elec, tab_free, tab_summary = st.tabs([
-    "⚙️ ปรับแต่งวิชาแกน", 
-    "📚 วิชาศึกษาทั่วไป", 
-    "💻 วิชาเลือกสาขา", 
-    "🎨 วิชาเลือกเสรี", 
+# ---------------------------------------------------------
+# 3. เตรียมข้อมูล
+# ---------------------------------------------------------
+all_major_courses = df_core[df_core['major_ref'] == selected_major_name]
+
+# แยกกลุ่ม 1: วิชาแกน (False)
+core_subjects = all_major_courses[all_major_courses['is_major_elective'] == False]
+# แยกกลุ่ม 2: วิชาเลือกสาขา (True จาก Sheet Core)
+major_electives_plan = all_major_courses[all_major_courses['is_major_elective'] == True]
+
+total_earned = 0
+earned_core = 0
+earned_maj_plan = 0
+earned_maj_pool = 0
+earned_gen = 0
+earned_free = 0
+
+# ---------------------------------------------------------
+# 4. Tabs Management (5 Tabs + Summary)
+# ---------------------------------------------------------
+tab_names = [
+    "⚙️ 1. วิชาแกน", 
+    "⚡ 2. วิชาเลือก (ตามแผน)", 
+    "💻 3. วิชาเลือก (เพิ่มเติม)", 
+    "📚 4. ศึกษาทั่วไป", 
+    "🎨 5. เลือกเสรี", 
     "📊 สรุปผล"
-])
+]
+tabs = st.tabs(tab_names)
 
-# ---------------------------------------------------------
-# TAB 1: ปรับแต่งวิชาแกน (Core Courses Customization)
-# ---------------------------------------------------------
-with tab_core:
-    st.info(f"ระบบเลือกวิชาแกนให้อัตโนมัติสำหรับ **{selected_year_str}** (คุณสามารถติ๊กออกได้หากยังไม่ผ่าน)")
+# --- TAB 1: วิชาแกน (Core) ---
+with tabs[0]:
+    st.info(f"ระบบเลือกวิชาให้อัตโนมัติถึง **ปี {int(selected_term)} เทอม {int((selected_term*10)%10)}**")
     
-    core_credits_sum = 0
-    
-    # 🔴 เพิ่มบรรทัดนี้: กรองเอาเฉพาะวิชาของสาขาที่เลือก (selected_major_name)
-    # สมมติชื่อคอลัมน์ใน Sheet คือ 'major'
-    major_core_courses = core_courses_df[core_courses_df['major'] == selected_major_name]
-    
-    # วนลูปสร้าง Section ตามชั้นปี 1-4
-    for y in [1, 2, 3, 4]:
-        # เปลี่ยนจาก core_courses_df เป็น major_core_courses (ที่กรองแล้ว)
-        subjects_in_year = major_core_courses[major_core_courses['year'] == y]
+    unique_terms = sorted(core_subjects['term'].unique())
+    for t in unique_terms:
+        # Auto Expand
+        is_expanded = (t <= selected_term)
+        t_label = f"ปี {int(t)} เทอม {int((t*10)%10)}"
         
-        if not subjects_in_year.empty:
-            with st.expander(f"วิชาแกน ปี {y}", expanded=(y <= current_year_num)):
-                for idx, row in subjects_in_year.iterrows():
-                    # Logic: ถ้าวิชาอยู่ปีต่ำกว่าหรือเท่ากับปีปัจจุบัน ให้ Default เป็น True (ติ๊กถูก)
-                    is_default_checked = (y <= current_year_num)
-                    
-                    # Checkbox
-                    checked = st.checkbox(
-                        f"{row['subject_name']} ({row['credits']} นก.)",
-                        value=is_default_checked,
-                        key=f"core_{row['subject_name']}_{current_year_num}"
-                    )
-                    
-                    if checked:
-                        core_credits_sum += row['credits']
+        with st.expander(f"📍 {t_label}", expanded=is_expanded):
+            subs = core_subjects[core_subjects['term'] == t]
+            for idx, row in subs.iterrows():
+                # Logic Auto Check
+                is_checked = (t <= selected_term)
+                # ใส่ selected_term ใน Key เพื่อบังคับ Reset ปุ่ม
+                key_id = f"core_{row['subject_name']}_{idx}_{selected_term}"
+                
+                if st.checkbox(f"{row['subject_name']} ({row['credits']} นก.)", value=is_checked, key=key_id):
+                    earned_core += row['credits']
     
-    st.write(f"**รวมหน่วยกิตวิชาแกนที่เก็บได้: :green[{core_credits_sum}] หน่วยกิต**")
-    total_credits_earned += core_credits_sum
+    total_earned += earned_core
+    st.write(f"**รวมวิชาแกน:** :green[{earned_core}]")
 
-# ---------------------------------------------------------
-# TAB 2: วิชาศึกษาทั่วไป
-# ---------------------------------------------------------
-with tab_gen:
-    st.subheader("หมวดวิชาศึกษาทั่วไป")
-    gen_credits_sum = 0
-    categories = gen_ed_df['category'].unique()
+# --- TAB 2: วิชาเลือกสาขา (จาก Sheet Core เท่านั้น) ---
+with tabs[1]:
+    st.subheader("วิชาเลือกเฉพาะสาขา (ที่ระบุในแผนการเรียน)")
     
-    for cat in categories:
-        with st.expander(f"หมวด: {cat}"):
-            subjects = gen_ed_df[gen_ed_df['category'] == cat]
-            for idx, row in subjects.iterrows():
-                if st.checkbox(f"{row['subject_name']} ({row['credits']})", key=f"gen_{idx}"):
-                    gen_credits_sum += row['credits']
-                    
-    total_credits_earned += gen_credits_sum
-
-# ---------------------------------------------------------
-# TAB 3: วิชาเลือกสาขา
-# ---------------------------------------------------------
-with tab_elec:
-    st.subheader("วิชาเลือก")
-    selected_maj_elec = st.multiselect("เลือกวิชา", electives_df['subject_name'], key="maj_elec")
-    
-    maj_elec_sum = 0
-    for subj in selected_maj_elec:
-        c = electives_df[electives_df['subject_name'] == subj]['credits'].values[0]
-        maj_elec_sum += c
+    if not major_electives_plan.empty:
+        for idx, row in major_electives_plan.iterrows():
+            # Checkbox ธรรมดา (User เลือกเอง)
+            key_id = f"me_plan_{idx}"
+            if st.checkbox(f"{row['subject_name']} ({row['credits']} นก.)", key=key_id):
+                earned_maj_plan += row['credits']
+    else:
+        st.info("ไม่มีรายวิชาเลือกที่ระบุในแผนการเรียนสำหรับสาขานี้")
         
-    st.write(f"เลือกไป: {maj_elec_sum} หน่วยกิต")
-    total_credits_earned += maj_elec_sum
+    total_earned += earned_maj_plan
+    st.write(f"**รวมส่วนนี้:** :green[{earned_maj_plan}]")
 
-# ---------------------------------------------------------
-# TAB 4: วิชาเลือกเสรี
-# ---------------------------------------------------------
-with tab_free:
-    st.subheader("วิชาเลือกเสรี")
-    selected_free_elec = st.multiselect("เลือกวิชา", electives_df['subject_name'], key="free_elec")
+# --- TAB 3: วิชาเลือกสาขา (จาก Sheet Elective Pool) ---
+with tabs[2]:
+    st.subheader("วิชาเลือกสาขา (เลือกเพิ่มเติมจาก Pool)")
     
-    free_elec_sum = 0
-    for subj in selected_free_elec:
-        c = electives_df[electives_df['subject_name'] == subj]['credits'].values[0]
-        free_elec_sum += c
-        
-    st.write(f"เลือกไป: {free_elec_sum} หน่วยกิต")
-    total_credits_earned += free_elec_sum
-
-remaining = max(total_credits - total_credits_earned, 0)
-progress = min(total_credits_earned / total_credits, 1.0)
-percent = progress * 100
-
-# ---------------------------------------------------------
-# ส่วนแสดงผลคงที่ (Persistent Display)
-# ---------------------------------------------------------
-
-# 1. SIDEBAR: สำหรับ Desktop (แสดงด้านซ้าย)
-with st.sidebar:
-    st.header("📊 สถานะปัจจุบัน")
-    
-    # แสดง Progress Bar
-    st.progress(progress, text=f"คืบหน้า {percent:.1f}%")
-    
-    # แสดง Metric ตัวใหญ่
-    st.metric(
-        label="หน่วยกิตสะสม",
-        value=f"{total_credits_earned}/{total_credits}",
-        delta=f"เหลืออีก {remaining}",
-        delta_color="inverse" # สีแดงถ้ายังเหลือเยอะ
+    # Multiselect จาก Sheet Elective
+    selected_pool = st.multiselect(
+        "ค้นหาและเลือกรายวิชา", 
+        df_elec['subject_name'], 
+        key="me_pool_tab3"
     )
     
-    st.divider()
+    for subj in selected_pool:
+        c = df_elec[df_elec['subject_name'] == subj]['credits'].values[0]
+        earned_maj_pool += c
     
-    # สรุปย่อๆ ใน Sidebar
-    st.caption("รายละเอียด")
-    st.markdown(f"""
-    - **วิชาแกน:** {core_credits_sum}
-    - **ศึกษาทั่วไป:** {gen_credits_sum}
-    - **เลือกสาขา:** {maj_elec_sum}
-    - **เลือกเสรี:** {free_elec_sum}
-    """)
+    total_earned += earned_maj_pool
+    st.write(f"**รวมส่วนนี้:** :green[{earned_maj_pool}]")
 
-    # 🔴 เพิ่มปุ่มรีโหลดตรงนี้ครับ
-    if st.button("🔄 อัปเดตข้อมูลล่าสุด"):
-        load_data.clear()  # สั่งล้าง Cache ของฟังก์ชัน load_data
-        st.rerun()         # สั่งรันหน้าเว็บใหม่ทันที
+# --- TAB 4: ศึกษาทั่วไป ---
+with tabs[3]:
+    st.caption("หมวดวิชาศึกษาทั่วไป")
+    cats = df_7group['category'].unique()
+    for cat in cats:
+        with st.expander(cat, expanded=False):
+            subs = df_7group[df_7group['category'] == cat]
+            for idx, row in subs.iterrows():
+                if st.checkbox(f"{row['subject_name']} ({row['credits']})", key=f"gen_{idx}"):
+                    earned_gen += row['credits']
+    total_earned += earned_gen
 
-    
-# ---------------------------------------------------------
-# TAB 5: สรุปผล (Dashboard & Export Image)
-# ---------------------------------------------------------
-with tab_summary:
-    st.header("📊 สรุปผลการเรียนและหน่วยกิต")
-    
-    # --- ส่วนแสดงผลบนหน้าเว็บ (Web UI) ---
-    col_sum1, col_sum2, col_sum3 = st.columns(3)
-    with col_sum1:
-        st.metric("หน่วยกิตที่เก็บได้", f"{total_credits_earned}", f"{total_credits_earned - total_credits} ขาดอีก", delta_color="normal")
-    with col_sum2:
-        st.metric("เป้าหมายหลักสูตร", f"{total_credits}", "หน่วยกิต")
-    with col_sum3:
-        percent = (total_credits_earned / total_credits) * 100
-        st.metric("ความคืบหน้า", f"{percent:.1f}%")
+# --- TAB 5: เลือกเสรี ---
+with tabs[4]:
+    st.caption("วิชาเลือกเสรี")
+    sel_free = st.multiselect("เลือกวิชาเสรี", df_free['subject_name'], key="free_sel")
+    for subj in sel_free:
+        c = df_free[df_free['subject_name'] == subj]['credits'].values[0]
+        earned_free += c
+    total_earned += earned_free
 
-    st.divider()
+# --- TAB 6: สรุปผล ---
+with tabs[5]:
+    remaining = max(total_credits_goal - total_earned, 0)
+    percent = (total_earned / total_credits_goal) * 100
+    if percent > 100: percent = 100
 
+    # UI สรุป
+    st.header("📊 สรุปผลการเรียน")
+    m1, m2, m3 = st.columns(3)
+    m1.metric("หน่วยกิตสะสม", f"{total_earned}", f"ขาดอีก {remaining}", delta_color="normal")
+    m2.metric("เป้าหมาย", f"{total_credits_goal}")
+    m3.metric("ความคืบหน้า", f"{percent:.1f}%")
+    st.progress(percent/100)
+
+    # รวมหน่วยกิตวิชาเลือกทั้ง 2 Tab เข้าด้วยกันเพื่อแสดงในกราฟ
+    total_major_elec = earned_maj_plan + earned_maj_pool
+
+    # Graph
     col_chart, col_detail = st.columns([1, 1.5])
-    
-    # เตรียมข้อมูลสำหรับกราฟ
-    summary_labels = ['Core', 'GenEd', 'Major', 'Free', 'Missing'] # ใช้ภาษาอังกฤษเพื่อกันสระลอยในรูปภาพ (ถ้าไม่มี Font ไทย)
-    summary_values = [core_credits_sum, gen_credits_sum, maj_elec_sum, free_elec_sum, remaining]
-    # สี: ฟ้า(แกน), ส้ม(GenEd), แดง(สาขา), เขียว(เสรี), เทา(ขาด)
-    colors_list = ['#4c78a8', '#f58518', '#e45756', '#72b7b2', '#bab0ac'] 
+    labels = ['Core', 'MajorElec', 'GenEd', 'FreeElec', 'Missing']
+    values = [earned_core, total_major_elec, earned_gen, earned_free, remaining]
+    colors = ['#4c78a8', '#e45756', '#f58518', '#72b7b2', '#bab0ac']
 
-    # 1. กราฟวงกลมบนหน้าเว็บ (Altair)
     with col_chart:
-        st.caption("สัดส่วนหน่วยกิตของคุณ")
-        df_chart = pd.DataFrame({'Category': summary_labels, 'Credits': summary_values, 'Color': colors_list})
-        base = alt.Chart(df_chart).encode(theta=alt.Theta("Credits", stack=True))
-        pie = base.mark_arc(outerRadius=100, innerRadius=60).encode(
-            color=alt.Color("Category", scale=alt.Scale(domain=summary_labels, range=colors_list)),
-            order=alt.Order("Credits", sort="descending"),
-            tooltip=["Category", "Credits"]
+        df_pie = pd.DataFrame({'Category': labels, 'Val': values, 'Color': colors})
+        pie = alt.Chart(df_pie).encode(theta=alt.Theta("Val", stack=True)).mark_arc(outerRadius=100, innerRadius=60).encode(
+            color=alt.Color("Category", scale=alt.Scale(domain=labels, range=colors)),
+            tooltip=["Category", "Val"]
         )
         st.altair_chart(pie, use_container_width=True)
 
-    # 2. บาร์ชาร์ตบนหน้าเว็บ
     with col_detail:
-        st.subheader("รายละเอียดรายหมวด")
-        def progress_row(label, current, target, color_hex):
-            st.write(f"**{label}**")
-            cols = st.columns([3, 1])
-            p_val = min(current/target if target > 0 else 0, 1.0)
-            cols[0].progress(p_val)
-            cols[1].caption(f"{current}/{target}")
-        
-        progress_row("วิชาแกน", core_credits_sum, 80, "#4c78a8")
-        progress_row("ศึกษาทั่วไป", gen_credits_sum, 30, "#f58518")
-        progress_row("เลือกสาขา", maj_elec_sum, 6, "#e45756")
-        progress_row("เลือกเสรี", free_elec_sum, 6, "#72b7b2")
+        st.write("**รายละเอียด:**")
+        st.write(f"- ⚙️ Core: {earned_core}")
+        st.write(f"- ⚡ Major Elec (แผน): {earned_maj_plan}")
+        st.write(f"- 💻 Major Elec (Pool): {earned_maj_pool}")
+        st.write(f"- 📚 GenEd: {earned_gen}")
+        st.write(f"- 🎨 Free Elec: {earned_free}")
 
+    # Image Generator
     st.divider()
-
-    # ---------------------------------------------------------
-    # ส่วนสร้างรูปภาพ (Image Generator) เลียนแบบ UI
-    # ---------------------------------------------------------
-    st.subheader("💾 บันทึกผลการเรียน")
-    
-    if st.button("📸 สร้างรูปภาพสรุปผล (พร้อมลายน้ำ)"):
-        # 1. ตั้งค่า Canvas
-        fig = plt.figure(figsize=(10, 6)) # ขนาดภาพแนวนอน
+    if st.button("📸 สร้างรูปภาพสรุปผล"):
+        fig = plt.figure(figsize=(10, 6))
         fig.patch.set_facecolor('white')
-        
-        # ใช้ GridSpec แบ่งพื้นที่: บน (Metrics), ล่างซ้าย (Pie), ล่างขวา (Bars)
         gs = gridspec.GridSpec(2, 2, height_ratios=[0.3, 0.7], width_ratios=[1, 1.5])
-        
-        # --- A. ส่วน Header (Metrics) ---
+
         ax_top = plt.subplot(gs[0, :])
         ax_top.axis('off')
-        
-        # วาด Text จำลอง Metric
-        # (x, y) คือพิกัดในกล่องข้อความ
-        ax_top.text(0.15, 0.6, "Credits Earned", ha='center', fontsize=10, color='gray')
-        ax_top.text(0.15, 0.3, f"{total_credits_earned}", ha='center', fontsize=24, fontweight='bold', color='#333')
-        
-        ax_top.text(0.5, 0.6, "Target Goal", ha='center', fontsize=10, color='gray')
-        ax_top.text(0.5, 0.3, f"{total_credits}", ha='center', fontsize=24, fontweight='bold', color='#333')
-        
-        ax_top.text(0.85, 0.6, "Progress", ha='center', fontsize=10, color='gray')
-        ax_top.text(0.85, 0.3, f"{percent:.1f}%", ha='center', fontsize=24, fontweight='bold', color='#4c78a8')
-        
-        # --- B. ส่วน Donut Chart (ล่างซ้าย) ---
+        ax_top.text(0.15, 0.5, "Earned", ha='center', color='gray')
+        ax_top.text(0.15, 0.1, f"{total_earned}", ha='center', fontsize=22, fontweight='bold')
+        ax_top.text(0.5, 0.5, "Goal", ha='center', color='gray')
+        ax_top.text(0.5, 0.1, f"{total_credits_goal}", ha='center', fontsize=22, fontweight='bold')
+        ax_top.text(0.85, 0.5, "Progress", ha='center', color='gray')
+        ax_top.text(0.85, 0.1, f"{percent:.1f}%", ha='center', fontsize=22, fontweight='bold', color='#4c78a8')
+
         ax_pie = plt.subplot(gs[1, 0])
-        # ข้อมูลสำหรับ Pie (ตัดส่วน 'Missing' ออกเพื่อให้สวยงามเหมือน Donut ปกติ)
-        # หรือจะใส่ Missing ไปด้วยก็ได้แล้วแต่ชอบครับ อันนี้ผมใส่ครบตาม mockup
-        wedges, texts = ax_pie.pie(summary_values, colors=colors_list, startangle=90, 
-                                   wedgeprops=dict(width=0.4, edgecolor='w')) # width=0.4 ทำให้เป็น Donut
-        ax_pie.text(0, 0, f"{total_credits_earned}", ha='center', va='center', fontsize=20, fontweight='bold', color='#555')
-        
-        # --- C. ส่วน Bar Chart (ล่างขวา) ---
+        ax_pie.pie(values, colors=colors, startangle=90, wedgeprops=dict(width=0.4, edgecolor='w'))
+        ax_pie.text(0, 0, f"{int(percent)}%", ha='center', va='center', fontsize=16, fontweight='bold', color='#555')
+
         ax_bar = plt.subplot(gs[1, 1])
-        ax_bar.axis('off') # ปิดแกน x, y
+        ax_bar.axis('off')
+        y_pos = 3.5
+        items = [("Core", earned_core, colors[0]), 
+                 ("Major", total_major_elec, colors[1]),
+                 ("GenEd", earned_gen, colors[2]), 
+                 ("Free", earned_free, colors[3])]
         
-        # รายการที่จะวาด Bar
-        bar_items = [
-            ("Core Courses", core_credits_sum, 80, colors_list[0]),
-            ("GenEd", gen_credits_sum, 30, colors_list[1]),
-            ("Major Elec", maj_elec_sum, 6, colors_list[2]),
-            ("Free Elec", free_elec_sum, 6, colors_list[3])
-        ]
+        for lb, val, c in items:
+            ax_bar.text(0, y_pos, lb, fontweight='bold', color='#333')
+            ax_bar.barh(y_pos-0.3, 100, height=0.15, color='#f0f0f0', left=0)
+            p_bar = min((val/30)*100, 100) 
+            ax_bar.barh(y_pos-0.3, p_bar, height=0.15, color=c, left=0)
+            ax_bar.text(105, y_pos-0.3, f"{val}", va='center', color='#666')
+            y_pos -= 1
         
-        # วาด Bar ทีละแถว (Manual Drawing เพื่อความสวยงาม)
-        y_pos = 3.5 # ตำแหน่งเริ่มต้น (ไล่จากบนลงล่าง)
-        for label, val, target, color in bar_items:
-            # ชื่อหมวด
-            ax_bar.text(0, y_pos, label, fontsize=12, fontweight='bold', color='#333')
-            
-            # หลอดพื้นหลัง (สีเทาจางๆ)
-            ax_bar.barh(y_pos - 0.3, 100, height=0.15, color='#f0f0f0', align='center', left=0)
-            
-            # หลอดความคืบหน้า (สีจริง) คำนวณ % เทียบกับ 100
-            p = min((val / target) * 100 if target > 0 else 0, 100)
-            ax_bar.barh(y_pos - 0.3, p, height=0.15, color=color, align='center', left=0)
-            
-            # ตัวเลข 27/80
-            ax_bar.text(105, y_pos - 0.3, f"{val}/{target}", va='center', fontsize=10, color='#666')
-            
-            y_pos -= 1 # ขยับลงบรรทัดถัดไป
-
-        # --- D. ใส่ลายน้ำ (Watermark) ---
-        fig.text(0.5, 0.5, 'Credit Planner (Mockup)', 
-                 fontsize=40, color='gray', alpha=0.1, # alpha คือความจาง
-                 ha='center', va='center', rotation=30) # เอียง 30 องศา
-
+        fig.text(0.5, 0.5, 'DekPSU Planner', fontsize=40, color='gray', alpha=0.1, ha='center', va='center', rotation=30)
+        
         plt.tight_layout()
-        
-        # แปลงเป็นไฟล์ให้โหลด
         buf = io.BytesIO()
         plt.savefig(buf, format="png", dpi=150, bbox_inches='tight')
         buf.seek(0)
-        
-        col_dl1, col_dl2 = st.columns([1, 2])
-        with col_dl1:
-            st.download_button(
-                label="⬇️ ดาวน์โหลดรูปภาพ",
-                data=buf,
-                file_name="credit_summary_watermark.png",
-                mime="image/png"
-            )
-        with col_dl2:
-            st.success("สร้างรูปภาพเสร็จสิ้น!")
-        
-        st.image(buf, caption="ตัวอย่างรูปภาพที่จะได้รับ", width=500)  
+        st.download_button("⬇️ Download Image", buf, "summary.png", "image/png")
+
+# Sidebar
+with st.sidebar:
+    st.header(f"สถานะ: {selected_fac_name}")
+    st.write(f"สาขา: {selected_major_name}")
+    st.progress(percent/100, f"{percent:.1f}%")
+    if st.button("🔄 Reload Data"):
+        load_data.clear()
+        st.rerun()

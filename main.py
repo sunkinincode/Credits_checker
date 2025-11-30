@@ -181,77 +181,7 @@ with st.sidebar:
         load_data.clear()  # สั่งล้าง Cache ของฟังก์ชัน load_data
         st.rerun()         # สั่งรันหน้าเว็บใหม่ทันที
 
-
-# 2. STICKY BOTTOM BAR: สำหรับ Mobile (แสดงด้านล่าง)
-# ใช้ CSS Injection สร้างแถบลอย (Floating Bar)
-st.markdown(f"""
-<style>
-/* ซ่อนแถบนี้บนหน้าจอใหญ่ (PC) */
-.floating-bottom-bar {{
-    display: none;
-}}
-
-/* แสดงเฉพาะหน้าจอที่เล็กกว่า 768px (Mobile/Tablet) */
-@media screen and (max-width: 768px) {{
-    .floating-bottom-bar {{
-        display: block;
-        position: fixed;
-        bottom: 0;
-        left: 0;
-        width: 100%;
-        background-color: white;
-        padding: 10px 15px;
-        box-shadow: 0px -2px 10px rgba(0,0,0,0.1);
-        z-index: 999999;
-        border-top: 1px solid #e0e0e0;
-        font-family: sans-serif;
-    }}
     
-    /* ดันเนื้อหาหลักขึ้นไปหน่อย ไม่ให้โดนแถบบัง */
-    .block-container {{
-        padding-bottom: 120px;
-    }}
-    
-    /* ซ่อน Decoration ด้านบนของ Streamlit เพื่อประหยัดที่ */
-    header {{visibility: hidden;}}
-}}
-
-/* ดีไซน์หลอดพลังใน CSS */
-.css-progress-track {{
-    background-color: #f0f2f6;
-    border-radius: 10px;
-    height: 8px;
-    width: 100%;
-    margin-top: 5px;
-}}
-.css-progress-fill {{
-    background-color: #00cc00; /* สีเขียว */
-    height: 100%;
-    border-radius: 10px;
-    width: {percent}%;
-    transition: width 0.5s ease-in-out;
-}}
-</style>
-
-<div class="floating-bottom-bar">
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
-        <span style="font-size: 14px; font-weight: bold; color: #31333F;">
-            หน่วยกิตสะสม: {total_credits_earned}/{total_credits}
-        </span>
-        <span style="font-size: 12px; color: #ff4b4b; font-weight: bold;">
-            (ขาด {remaining})
-        </span>
-    </div>
-    
-    <div class="css-progress-track">
-        <div class="css-progress-fill"></div>
-    </div>
-    <div style="text-align: right; font-size: 10px; color: #888; margin-top: 2px;">
-        {percent:.1f}%
-    </div>
-</div>
-""", unsafe_allow_html=True)
-
 # ---------------------------------------------------------
 # TAB 5: สรุปผล (Dashboard & Export Image)
 # ---------------------------------------------------------

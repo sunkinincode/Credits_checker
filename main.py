@@ -1,20 +1,137 @@
 import streamlit as st
 import pandas as pd
 import altair as alt
-import matplotlib.pyplot as plt
-from matplotlib import gridspec
-import io
 
 # ตั้งค่าหน้าเว็บ
 st.set_page_config(page_title="Credits Checker For DekPSU", page_icon="🎓", layout="wide")
 
+# ==========================================
+# [NEW] First Time Tutorial Popup
+# ==========================================
+@st.dialog("ยินดีต้อนรับสู่ Credits Checker! 🎓")
+def show_tutorial():
+    st.write("ระบบช่วยตรวจสอบและวางแผนการเรียนสำหรับเด็ก ม.อ.")
+    
+    # ใช้ Tabs ใน Popup เพื่อแบ่งหัวข้อสอน
+    tab1, tab2, tab3 = st.tabs(["1️⃣ ตั้งค่าข้อมูล", "2️⃣ เลือกวิชา", "3️⃣ ดูผลลัพธ์"])
+    
+    with tab1:
+        st.info("ขั้นตอนแรก: เลือกข้อมูลส่วนตัวที่แถบด้านบน")
+        st.markdown("""
+        * 📅 **ปี/เทอม:** เลือกชั้นปีปัจจุบันของคุณ
+        * 🏢 **คณะ/สาขา:** เลือกสาขาวิชาที่คุณเรียน
+        * ระบบจะดึงหลักสูตรที่ตรงกับสาขามาให้ทันที
+        """)
+        # ใส่รูปภาพประกอบได้ (ถ้ามี)
+        # st.image("https://example.com/step1.gif")
+
+    with tab2:
+        st.info("ขั้นตอนที่สอง: ติ๊กรายวิชาที่เรียนแล้ว")
+        st.markdown("""
+        * **Tab วิชาแกน:** ระบบจะ Auto-check วิชาตามชั้นปีให้ (แก้ได้)
+        * **Tab อื่นๆ:** เลือกวิชาเลือก, สหกิจ, หรือวิชาเสรีที่เรียนไปแล้ว
+        * ถ้าวิชามีกลุ่มย่อย สามารถกดขยายดูได้
+        """)
+
+    with tab3:
+        st.info("ขั้นตอนสุดท้าย: ตรวจสอบหน่วยกิต")
+        st.markdown("""
+        * ดูสรุปหน่วยกิตคงเหลือที่ **Sidebar ด้านซ้าย**
+        * กดปุ่ม **🖼️ Image** เพื่อโหลดรูปสรุปผลไปอวดเพื่อนได้เลย!
+        """)
+
+    if st.button("เริ่มใช้งานเลย! 🚀", type="primary", use_container_width=True):
+        st.session_state["has_seen_tutorial"] = True
+        st.rerun()
+
+if "has_seen_tutorial" not in st.session_state:
+    show_tutorial()
+
+# ==========================================
+# 1. Helper Functions
+# ==========================================
+
+def format_subject_label(row):
+    return f"**{row['subject_id']} {row['subject_name_en']}** \n:gray[{row['subject_name_th']} | {int(row['credits'])} หน่วยกิต]"
+def format_subject_label_for_multiple(row):
+    return f"{row['subject_id']} {row['subject_name_en']} | {row['subject_name_th']} ({int(row['credits'])} หน่วยกิต)"
+
+def check_major_match(major_ref_str, target_abbr):
+    if pd.isna(major_ref_str): return False
+    majors_list = [m.strip().upper() for m in str(major_ref_str).split(',')]
+    return target_abbr.upper() in majors_list
+
+def render_grouped_checkoxes(df_subjects, key_prefix, earned_counter_list, selected_subjects_data):
+    """
+    df_subjects: DataFrame ของวิชาที่จะแสดง
+    key_prefix: ตัวหน้านำหน้า key (เช่น 'me_plan', 'pool')
+    earned_counter_list: list ที่เก็บ [earned_credits] (ใช้ list เพื่อ pass by reference)
+    selected_subjects_data: list เก็บข้อมูลวิชาที่เลือก
+    """
+    # -------------------------------------------------------
+    # 🔴 ป้องกัน KeyError: ถ้าไม่มี column 'group' ให้สร้างหลอกๆ ขึ้นมา
+    if 'group' not in df_subjects.columns:
+        df_subjects = df_subjects.copy() # ป้องกัน SettingWithCopyWarning
+        df_subjects['group'] = ''
+    # -------------------------------------------------------
+    
+    # 1. แยกวิชาที่มีกลุ่ม และไม่มีกลุ่ม
+    # ใช้ .copy() เพื่อป้องกัน Warning เวลา modify dataframe slice
+    df_subjects = df_subjects.copy()
+    df_subjects['group_str'] = df_subjects['group'].fillna('').astype(str)
+    
+    # แปลง 'nan' string ให้เป็น empty string (เผื่อหลุดมา)
+    df_subjects.loc[df_subjects['group_str'] == 'nan', 'group_str'] = ''
+    
+    df_no_group = df_subjects[df_subjects['group_str'] == '']
+    df_has_group = df_subjects[df_subjects['group_str'] != '']
+
+    # 2. แสดงวิชาที่ไม่มีกลุ่มก่อน (ถ้ามี)
+    if not df_no_group.empty:
+        for idx, row in df_no_group.iterrows():
+            key_id = f"{key_prefix}_{row['subject_id']}_{idx}_nogroup"
+            if st.checkbox(format_subject_label(row), key=key_id):
+                earned_counter_list[0] += row['credits']
+                selected_subjects_data.append(row.to_dict())
+
+    # 3. จัดการวิชาที่มีกลุ่ม
+    if not df_has_group.empty:
+        # เรียงลำดับตามชื่อกลุ่ม
+        unique_groups = sorted(df_has_group['group_str'].unique())
+
+        for group_name in unique_groups:
+            subs_in_group = df_has_group[df_has_group['group_str'] == group_name]
+            
+            # Logic การแสดงผล Header vs Expander
+            # ถ้าชื่อกลุ่มไม่มีจุด (.) เช่น "1 กลุ่มภาษา" -> Header
+            # ถ้ามีจุด (.) เช่น "1.1 ภาษาอังกฤษ" -> Expander
+            is_main_group = '.' not in group_name.split(' ')[0]
+            
+            if is_main_group:
+                st.markdown(f"##### 📂 {group_name}")
+                for idx, row in subs_in_group.iterrows():
+                    key_id = f"{key_prefix}_{row['subject_id']}_{idx}_main_{group_name}"
+                    if st.checkbox(format_subject_label(row), key=key_id):
+                        earned_counter_list[0] += row['credits']
+                        selected_subjects_data.append(row.to_dict())
+            else:
+                with st.expander(f"🔹 {group_name}", expanded=False):
+                    for idx, row in subs_in_group.iterrows():
+                        key_id = f"{key_prefix}_{row['subject_id']}_{idx}_sub_{group_name}"
+                        if st.checkbox(format_subject_label(row), key=key_id):
+                            earned_counter_list[0] += row['credits']
+                            selected_subjects_data.append(row.to_dict())
+
 # ---------------------------------------------------------
-# 1. ฟังก์ชันโหลดข้อมูล
+# 2. Load Data (Updated for 'group' column)
 # ---------------------------------------------------------
 @st.cache_data(ttl=600)
 def load_data():
-    # ⚠️ ใส่ ID ของ Google Sheet ของคุณที่นี่
-    sheet_id = "1E12HO-5bd85vjFHnfcxZCLcN4y2k_uQnRgjE8zeGAbI"
+    try:
+        sheet_id = st.secrets["google_sheets"]["sheet_id"]
+    except Exception:
+        st.error("❌ ไม่พบ Sheet ID ใน .streamlit/secrets.toml")
+        st.stop()
     
     base_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet="
 
@@ -26,262 +143,218 @@ def load_data():
         df_elec = pd.read_csv(base_url + "Elective")
         df_free = pd.read_csv(base_url + "FreeElective")
 
-        # Data Cleaning
-        if 'is_major_elective' in df_core.columns:
-            df_core['is_major_elective'] = df_core['is_major_elective'].astype(str).str.upper() == 'TRUE'
+        for df in [df_core]:
+             df['subject_id'] = df['subject_id'].astype(str).str.strip()
+             df['subject_name_th'] = df['subject_name_th'].astype(str).str.strip()
+             df['subject_name_en'] = df['subject_name_en'].astype(str).str.strip()
+             
+             # [NEW] Handle 'group' column
+             if 'group' in df.columns:
+                 # แปลงเป็น string และจัดการ NaN
+                 df['group'] = df['group'].astype(str).replace('nan', '')
+             else:
+                 df['group'] = '' # ถ้าไม่มี column นี้ ให้สร้างเป็นว่างๆ ไว้
+
+        if 'major_abbreviation' in df_majors.columns:
+            df_majors['major_abbreviation'] = df_majors['major_abbreviation'].astype(str).str.strip()
         else:
-            df_core['is_major_elective'] = False
+            df_majors['major_abbreviation'] = df_majors['major_name']
+
+        if 'special_type' in df_core.columns:
+            df_core['special_type'] = df_core['special_type'].astype(str).str.strip()
+        else:
+            df_core['special_type'] = 'Normal Subject'
 
         for df in [df_majors, df_core, df_7group, df_elec, df_free]:
             if 'credits' in df.columns:
                 df['credits'] = pd.to_numeric(df['credits'], errors='coerce').fillna(0)
         
         df_core['term'] = pd.to_numeric(df_core['term'], errors='coerce').fillna(0)
+        
+        df_elec['display_label'] = df_elec.apply(format_subject_label_for_multiple, axis=1)
+        df_free['display_label'] = df_free.apply(format_subject_label_for_multiple, axis=1)
 
         return df_faculty, df_majors, df_core, df_7group, df_elec, df_free
 
     except Exception as e:
         st.error(f"Error loading data: {e}")
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return (pd.DataFrame() for _ in range(6))
 
 df_faculty, df_majors, df_core, df_7group, df_elec, df_free = load_data()
 
 if df_faculty.empty:
+    st.warning("⚠️ ไม่สามารถโหลดข้อมูลได้")
     st.stop()
 
 # ---------------------------------------------------------
-# 2. UI Control Panel
+# 3. UI Setup
 # ---------------------------------------------------------
 st.title("🎓 Credits Checker For DekPSU")
 st.markdown("---")
 
-col1, col2, col3 = st.columns([1, 2, 2])
-
-# Col 1: ปี/เทอม
+col1, col2, col3 = st.columns([2, 2, 1])
 with col1:
-    term_options = [1.1, 1.2, 2.1, 2.2, 3.1, 3.2, 4.1, 4.2]
-    selected_term = st.selectbox(
-        "📅 ชั้นปีและเทอมปัจจุบัน", 
-        term_options, 
-        format_func=lambda x: f"ปี {int(x)} เทอม {int((x*10)%10)}"
-    )
-
-# Col 2: คณะ
+    fac_options = df_faculty.apply(lambda x: f"{x['faculty_name']} ({x['major_count']} สาขา)", axis=1).tolist()
+    selected_fac_display = st.selectbox("🏢 คณะ", fac_options)
+    selected_fac_name = selected_fac_display.split(" (")[0]
 with col2:
-    if 'faculty_name' in df_faculty.columns:
-        fac_options = df_faculty.apply(lambda x: f"{x['faculty_name']} ({x['major_count']} สาขา)", axis=1).tolist()
-        selected_fac_display = st.selectbox("🏢 เลือกคณะ", fac_options)
-        selected_fac_name = selected_fac_display.split(" (")[0]
-    else:
-        st.error("Data Error")
-        st.stop()
-
-# Col 3: สาขา
-with col3:
     filtered_majors = df_majors[df_majors['faculty_ref'] == selected_fac_name]
-    if filtered_majors.empty:
-        st.warning("ไม่พบสาขา")
-        st.stop()
-    selected_major_name = st.selectbox("📚 เลือกสาขาวิชา", filtered_majors['major_name'])
-    total_credits_goal = filtered_majors[filtered_majors['major_name'] == selected_major_name]['total_credits'].values[0]
-
-# ---------------------------------------------------------
-# 3. เตรียมข้อมูล
-# ---------------------------------------------------------
-all_major_courses = df_core[df_core['major_ref'] == selected_major_name]
-
-# แยกกลุ่ม 1: วิชาแกน (False)
-core_subjects = all_major_courses[all_major_courses['is_major_elective'] == False]
-# แยกกลุ่ม 2: วิชาเลือกสาขา (True จาก Sheet Core)
-major_electives_plan = all_major_courses[all_major_courses['is_major_elective'] == True]
-
-total_earned = 0
-earned_core = 0
-earned_maj_plan = 0
-earned_maj_pool = 0
-earned_gen = 0
-earned_free = 0
-
-# ---------------------------------------------------------
-# 4. Tabs Management (5 Tabs + Summary)
-# ---------------------------------------------------------
-tab_names = [
-    "⚙️ 1. วิชาแกน", 
-    "⚡ 2. วิชาเลือก (ตามแผน)", 
-    "💻 3. วิชาเลือก (เพิ่มเติม)", 
-    "📚 4. ศึกษาทั่วไป", 
-    "🎨 5. เลือกเสรี", 
-    "📊 สรุปผล"
-]
-tabs = st.tabs(tab_names)
-
-# --- TAB 1: วิชาแกน (Core) ---
-with tabs[0]:
-    st.info(f"ระบบเลือกวิชาให้อัตโนมัติถึง **ปี {int(selected_term)} เทอม {int((selected_term*10)%10)}**")
+    if filtered_majors.empty: st.stop()
+    selected_major_name = st.selectbox("📚 สาขาวิชา", filtered_majors['major_name'])
+with col3:
+    term_options = [1.1, 1.2, 2.1, 2.2, 3.1, 3.2, 4.1, 4.2]
+    selected_term = st.selectbox("📅 ปี/เทอม", term_options, format_func=lambda x: f"ปี {int(x)} เทอม {int((x*10)%10)}")
     
+    row_major = filtered_majors[filtered_majors['major_name'] == selected_major_name].iloc[0]
+    total_credits_goal = row_major['total_credits']
+    selected_major_abbr = row_major['major_abbreviation']
+
+# ---------------------------------------------------------
+# 4. Filter Data
+# ---------------------------------------------------------
+all_major_courses = df_core[df_core['major_ref'].apply(lambda x: check_major_match(x, selected_major_abbr))]
+core_subjects = all_major_courses[all_major_courses['special_type'] == 'Normal Subject']
+major_electives_plan = all_major_courses[all_major_courses['special_type'] == 'Major Elective Subject']
+capstone_subjects = all_major_courses[all_major_courses['special_type'].isin(['Cooperative Education', 'Major Project'])]
+
+# Variables to track credits
+earned_core_list = [0]
+earned_maj_plan_list = [0]
+earned_maj_pool_list = [0]
+earned_capstone_list = [0]
+earned_gen_list = [0]
+earned_free_list = [0]
+selected_subjects_data = [] 
+
+# ---------------------------------------------------------
+# 5. Tabs Content
+# ---------------------------------------------------------
+tabs = st.tabs(["⚙️ วิชาสาขา", "⚡ วิชาเลือกภายในสาขา", "💻 วิชาเลือก", "📚 ศึกษาทั่วไป", "🎨 เลือกเสรี", "📊 สรุปผล"])
+
+# --- TAB 1: Core ---
+with tabs[0]:
+    st.info(f"Auto-check: {selected_major_abbr} (ถึงปี {int(selected_term)} เทอม {int((selected_term*10)%10)})")
     unique_terms = sorted(core_subjects['term'].unique())
     for t in unique_terms:
-        # Auto Expand
         is_expanded = (t <= selected_term)
-        t_label = f"ปี {int(t)} เทอม {int((t*10)%10)}"
-        
-        with st.expander(f"📍 {t_label}", expanded=is_expanded):
+        with st.expander(f"📍 ปี {int(t)} เทอม {int((t*10)%10)}", expanded=is_expanded):
             subs = core_subjects[core_subjects['term'] == t]
             for idx, row in subs.iterrows():
-                # Logic Auto Check
                 is_checked = (t <= selected_term)
-                # ใส่ selected_term ใน Key เพื่อบังคับ Reset ปุ่ม
-                key_id = f"core_{row['subject_name']}_{idx}_{selected_term}"
-                
-                if st.checkbox(f"{row['subject_name']} ({row['credits']} นก.)", value=is_checked, key=key_id):
-                    earned_core += row['credits']
+                key_id = f"core_{row['subject_id']}_{selected_term}_{selected_major_abbr}"
+                if st.checkbox(format_subject_label(row), value=is_checked, key=key_id):
+                    earned_core_list[0] += row['credits']
+                    selected_subjects_data.append(row.to_dict())
     
-    total_earned += earned_core
-    st.write(f"**รวมวิชาแกน:** :green[{earned_core}]")
+    if not capstone_subjects.empty:
+        coop = capstone_subjects[capstone_subjects['special_type'] == 'Cooperative Education']
+        proj = capstone_subjects[capstone_subjects['special_type'] == 'Major Project']
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("### 🏢 สหกิจ")
+            for idx, row in coop.iterrows():
+                if st.checkbox(format_subject_label(row), key=f"coop_{idx}_{selected_major_abbr}"): 
+                    earned_capstone_list[0] += row['credits']
+                    selected_subjects_data.append(row.to_dict())
+        with c2:
+            st.markdown("### 🛠️ โครงงาน")
+            for idx, row in proj.iterrows():
+                if st.checkbox(format_subject_label(row), key=f"proj_{idx}_{selected_major_abbr}"): 
+                    earned_capstone_list[0] += row['credits']
+                    selected_subjects_data.append(row.to_dict())
 
-# --- TAB 2: วิชาเลือกสาขา (จาก Sheet Core เท่านั้น) ---
+# --- TAB 2: Major Elective (Plan) [UPDATED WITH GROUP] ---
 with tabs[1]:
-    st.subheader("วิชาเลือกเฉพาะสาขา (ที่ระบุในแผนการเรียน)")
-    
     if not major_electives_plan.empty:
-        for idx, row in major_electives_plan.iterrows():
-            # Checkbox ธรรมดา (User เลือกเอง)
-            key_id = f"me_plan_{idx}"
-            if st.checkbox(f"{row['subject_name']} ({row['credits']} นก.)", key=key_id):
-                earned_maj_plan += row['credits']
+        # ใช้ฟังก์ชันใหม่ render_grouped_checkoxes แทน loop เดิม
+        render_grouped_checkoxes(
+            major_electives_plan, 
+            f"me_plan_{selected_major_abbr}", 
+            earned_maj_plan_list, 
+            selected_subjects_data
+        )
     else:
-        st.info("ไม่มีรายวิชาเลือกที่ระบุในแผนการเรียนสำหรับสาขานี้")
-        
-    total_earned += earned_maj_plan
-    st.write(f"**รวมส่วนนี้:** :green[{earned_maj_plan}]")
+        st.info("ไม่มีวิชาเลือกในแผน")
 
-# --- TAB 3: วิชาเลือกสาขา (จาก Sheet Elective Pool) ---
+# --- TAB 4: Pool [UPDATED WITH GROUP] ---
 with tabs[2]:
-    st.subheader("วิชาเลือกสาขา (เลือกเพิ่มเติมจาก Pool)")
-    
-    # Multiselect จาก Sheet Elective
-    selected_pool = st.multiselect(
-        "ค้นหาและเลือกรายวิชา", 
-        df_elec['subject_name'], 
-        key="me_pool_tab3"
-    )
-    
-    for subj in selected_pool:
-        c = df_elec[df_elec['subject_name'] == subj]['credits'].values[0]
-        earned_maj_pool += c
-    
-    total_earned += earned_maj_pool
-    st.write(f"**รวมส่วนนี้:** :green[{earned_maj_pool}]")
+    selected_pool_labels = st.multiselect("ค้นหา...", df_elec['display_label'].tolist(), key="me_pool_ms")
+    for label in selected_pool_labels:
+        row = df_elec[df_elec['display_label'] == label].iloc[0]
+        earned_maj_pool_list[0] += row['credits']
+        selected_subjects_data.append(row.to_dict())
 
-# --- TAB 4: ศึกษาทั่วไป ---
+# --- TAB 5: GenEd [UPDATED WITH GROUP] ---
 with tabs[3]:
-    st.caption("หมวดวิชาศึกษาทั่วไป")
     cats = df_7group['category'].unique()
     for cat in cats:
-        with st.expander(cat, expanded=False):
+        with st.expander(f"📚 {cat}", expanded=False):
             subs = df_7group[df_7group['category'] == cat]
-            for idx, row in subs.iterrows():
-                if st.checkbox(f"{row['subject_name']} ({row['credits']})", key=f"gen_{idx}"):
-                    earned_gen += row['credits']
-    total_earned += earned_gen
+            # ใช้ render group ภายใน category อีกที (ถ้ามี sub-group 1.1, 1.2)
+            render_grouped_checkoxes(subs, f"gen_{cat}", earned_gen_list, selected_subjects_data)
 
-# --- TAB 5: เลือกเสรี ---
+# --- TAB 6: Free Elective ---
 with tabs[4]:
-    st.caption("วิชาเลือกเสรี")
-    sel_free = st.multiselect("เลือกวิชาเสรี", df_free['subject_name'], key="free_sel")
-    for subj in sel_free:
-        c = df_free[df_free['subject_name'] == subj]['credits'].values[0]
-        earned_free += c
-    total_earned += earned_free
+    selected_free = st.multiselect("เลือกวิชาเสรี", df_free['display_label'].tolist(), key="free")
+    for label in selected_free:
+        row = df_free[df_free['display_label'] == label].iloc[0]
+        earned_free_list[0] += row['credits']
+        selected_subjects_data.append(row.to_dict())
 
-# --- TAB 6: สรุปผล ---
+# ---------------------------------------------------------
+# 6. Summary & Sidebar
+# ---------------------------------------------------------
+# ดึงค่าจาก list (เพราะ pass by reference)
+earned_core = earned_core_list[0]
+earned_maj_plan = earned_maj_plan_list[0]
+earned_maj_pool = earned_maj_pool_list[0]
+earned_capstone = earned_capstone_list[0]
+earned_gen = earned_gen_list[0]
+earned_free = earned_free_list[0]
+
+total_earned = earned_core + earned_maj_plan + earned_maj_pool + earned_capstone + earned_gen + earned_free
+remaining = max(total_credits_goal - total_earned, 0)
+percent_val = min(total_earned / total_credits_goal, 1.0)
+
+# --- TAB 7: Summary ---
 with tabs[5]:
-    remaining = max(total_credits_goal - total_earned, 0)
-    percent = (total_earned / total_credits_goal) * 100
-    if percent > 100: percent = 100
+    st.metric("รวมหน่วยกิต", f"{total_earned}/{total_credits_goal}", f"ขาด {remaining}")
+    st.progress(percent_val)
+    
+    data = pd.DataFrame({
+        'Category': ['Core', 'Maj.Elec', 'Capstone', 'GenEd', 'Free', 'Missing'],
+        'Credits': [earned_core, earned_maj_plan + earned_maj_pool, earned_capstone, earned_gen, earned_free, remaining]
+    })
+    c = alt.Chart(data).mark_arc(innerRadius=60).encode(
+        theta=alt.Theta("Credits", stack=True),
+        color=alt.Color("Category", scale=alt.Scale(range=['#006064', '#E65100', '#1B5E20', '#0D47A1', '#4A148C', '#B0BEC5'])),
+        tooltip=["Category", "Credits"]
+    )
+    st.altair_chart(c, use_container_width=True)
 
-    # UI สรุป
-    st.header("📊 สรุปผลการเรียน")
-    m1, m2, m3 = st.columns(3)
-    m1.metric("หน่วยกิตสะสม", f"{total_earned}", f"ขาดอีก {remaining}", delta_color="normal")
-    m2.metric("เป้าหมาย", f"{total_credits_goal}")
-    m3.metric("ความคืบหน้า", f"{percent:.1f}%")
-    st.progress(percent/100)
-
-    # รวมหน่วยกิตวิชาเลือกทั้ง 2 Tab เข้าด้วยกันเพื่อแสดงในกราฟ
-    total_major_elec = earned_maj_plan + earned_maj_pool
-
-    # Graph
-    col_chart, col_detail = st.columns([1, 1.5])
-    labels = ['Core', 'MajorElec', 'GenEd', 'FreeElec', 'Missing']
-    values = [earned_core, total_major_elec, earned_gen, earned_free, remaining]
-    colors = ['#4c78a8', '#e45756', '#f58518', '#72b7b2', '#bab0ac']
-
-    with col_chart:
-        df_pie = pd.DataFrame({'Category': labels, 'Val': values, 'Color': colors})
-        pie = alt.Chart(df_pie).encode(theta=alt.Theta("Val", stack=True)).mark_arc(outerRadius=100, innerRadius=60).encode(
-            color=alt.Color("Category", scale=alt.Scale(domain=labels, range=colors)),
-            tooltip=["Category", "Val"]
-        )
-        st.altair_chart(pie, use_container_width=True)
-
-    with col_detail:
-        st.write("**รายละเอียด:**")
-        st.write(f"- ⚙️ Core: {earned_core}")
-        st.write(f"- ⚡ Major Elec (แผน): {earned_maj_plan}")
-        st.write(f"- 💻 Major Elec (Pool): {earned_maj_pool}")
-        st.write(f"- 📚 GenEd: {earned_gen}")
-        st.write(f"- 🎨 Free Elec: {earned_free}")
-
-    # Image Generator
-    st.divider()
-    if st.button("📸 สร้างรูปภาพสรุปผล"):
-        fig = plt.figure(figsize=(10, 6))
-        fig.patch.set_facecolor('white')
-        gs = gridspec.GridSpec(2, 2, height_ratios=[0.3, 0.7], width_ratios=[1, 1.5])
-
-        ax_top = plt.subplot(gs[0, :])
-        ax_top.axis('off')
-        ax_top.text(0.15, 0.5, "Earned", ha='center', color='gray')
-        ax_top.text(0.15, 0.1, f"{total_earned}", ha='center', fontsize=22, fontweight='bold')
-        ax_top.text(0.5, 0.5, "Goal", ha='center', color='gray')
-        ax_top.text(0.5, 0.1, f"{total_credits_goal}", ha='center', fontsize=22, fontweight='bold')
-        ax_top.text(0.85, 0.5, "Progress", ha='center', color='gray')
-        ax_top.text(0.85, 0.1, f"{percent:.1f}%", ha='center', fontsize=22, fontweight='bold', color='#4c78a8')
-
-        ax_pie = plt.subplot(gs[1, 0])
-        ax_pie.pie(values, colors=colors, startangle=90, wedgeprops=dict(width=0.4, edgecolor='w'))
-        ax_pie.text(0, 0, f"{int(percent)}%", ha='center', va='center', fontsize=16, fontweight='bold', color='#555')
-
-        ax_bar = plt.subplot(gs[1, 1])
-        ax_bar.axis('off')
-        y_pos = 3.5
-        items = [("Core", earned_core, colors[0]), 
-                 ("Major", total_major_elec, colors[1]),
-                 ("GenEd", earned_gen, colors[2]), 
-                 ("Free", earned_free, colors[3])]
-        
-        for lb, val, c in items:
-            ax_bar.text(0, y_pos, lb, fontweight='bold', color='#333')
-            ax_bar.barh(y_pos-0.3, 100, height=0.15, color='#f0f0f0', left=0)
-            p_bar = min((val/30)*100, 100) 
-            ax_bar.barh(y_pos-0.3, p_bar, height=0.15, color=c, left=0)
-            ax_bar.text(105, y_pos-0.3, f"{val}", va='center', color='#666')
-            y_pos -= 1
-        
-        fig.text(0.5, 0.5, 'DekPSU Planner', fontsize=40, color='gray', alpha=0.1, ha='center', va='center', rotation=30)
-        
-        plt.tight_layout()
-        buf = io.BytesIO()
-        plt.savefig(buf, format="png", dpi=150, bbox_inches='tight')
-        buf.seek(0)
-        st.download_button("⬇️ Download Image", buf, "summary.png", "image/png")
-
-# Sidebar
+# --- Sidebar ---
 with st.sidebar:
-    st.header(f"สถานะ: {selected_fac_name}")
-    st.write(f"สาขา: {selected_major_name}")
-    st.progress(percent/100, f"{percent:.1f}%")
-    if st.button("🔄 Reload Data"):
-        load_data.clear()
-        st.rerun()
+    st.header(f"📌 {selected_major_abbr}")
+    st.caption(f"{selected_major_name}")
+    st.write(f"**{selected_fac_name}**")
+    st.divider()
+
+    col_sb1, col_sb2 = st.columns(2)
+    with col_sb1: st.metric("Earned", f"{total_earned}")
+    with col_sb2: st.metric("Total", f"{total_credits_goal}")
+    st.progress(percent_val)
+    st.divider()
+
+    st.subheader("📊 Breakdown")
+    st.write(f"⚙️ Core: **{earned_core}**")
+    st.write(f"⚡  Major Elec: **{earned_maj_plan + earned_maj_pool}**")
+    st.write(f"🎓 Capstone: **{earned_capstone}**")
+    st.write(f"📚 GenEd: **{earned_gen}**")
+    st.write(f"🎨 Free Elec: **{earned_free}**")
+    st.divider()
+
+    col_btn1, col_btn2 = st.columns(2)
+    with col_btn1:
+        if st.button("🔄 Reload", use_container_width=True):
+            load_data.clear()
+            st.rerun()
